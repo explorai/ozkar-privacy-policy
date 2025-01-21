@@ -1,0 +1,107 @@
+name: Run Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: The environment to deploy to
+        required: true
+        default: STAG
+        type: choice
+        options:
+          - STAG
+          - PROD
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      STAG_MONGO_URI: ${{ secrets.INTRANET_MONGO_STAG_URI }}
+      PROD_MONGO_URI: ${{ secrets.INTRANET_MONGO_PROD_URI }}
+      MONGODB_ATLAS_PUBLIC_API_KEY: ${{ secrets.MONGODB_ATLAS_PUBLIC_API_KEY }}
+      MONGODB_ATLAS_PRIVATE_API_KEY: ${{ secrets.MONGODB_ATLAS_PRIVATE_API_KEY }}
+      MONGODB_ATLAS_ORG_ID: ${{ secrets.MONGODB_ATLAS_ORG_ID }}
+      
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v2
+
+      - name: Get Public IP (cloudflare-ip)
+        id: ip
+        run: |
+          ipv4=$(dig +short -4 txt ch whoami.cloudflare @1.0.0.1)
+          echo "ipv4=$ipv4" >> $GITHUB_OUTPUT
+
+      - name: Setup AtlasCLI
+        uses: mongodb/atlas-github-action@v0.2.0  
+
+      - name: Setup Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: "3.12"
+          cache: 'pip'        
+      - run: pip install -r requirements.txt
+
+      - name: staging cleanup of staging IP access lists
+        if: inputs.environment == 'STAG'
+        shell: bash 
+        run: |
+          export PROJECT_ID=${{ secrets.MONGODB_ATLAS_STAG_PROJECT_ID }}
+          IP_ENTRIES=$(atlas accessList list --projectId $PROJECT_ID -o json | jq -r '.results[] | select(.comment == "staging ip whitelist") | .ipAddress')
+
+          if [ -z "$IP_ENTRIES" ]; then
+            echo "No IP addresses found with the comment 'staging ip whitelist'."
+            exit 0
+          fi
+
+          for IP in $IP_ENTRIES; do
+              echo "Deleting IP address '${IP}' with comment: 'staging ip whitelist'"
+              if ! atlas accessList delete "${IP}" --force --projectId $PROJECT_ID; then
+                echo "Failed to delete IP address: ${IP}"
+                exit 1
+              fi
+          done
+
+      - name: add currentIp for staging
+        if: inputs.environment == 'STAG'
+        shell: bash
+        run: atlas accessLists create ${{ steps.ip.outputs.ipv4 }} --type ipAddress --projectId ${{secrets.MONGODB_ATLAS_STAG_PROJECT_ID}} --comment "staging ip whitelist"
+
+      - name: Run script in staging
+        if: inputs.environment == 'STAG'
+        env:
+          MONGO_URI: ${{ env.STAG_MONGO_URI }}
+        run: python process_data.py          
+
+      - name: staging cleanup of prod IP access lists
+        if: inputs.environment == 'PROD'
+        shell: bash 
+        run: |
+          export PROJECT_ID=${{ secrets.MONGODB_ATLAS_PROD_PROJECT_ID }}
+          IP_ENTRIES=$(atlas accessList list --projectId $PROJECT_ID -o json | jq -r '.results[] | select(.comment == "prod ip whitelist") | .ipAddress')
+
+          if [ -z "$IP_ENTRIES" ]; then
+            echo "No IP addresses found with the comment 'prod ip whitelist'."
+            exit 0
+          fi
+
+          for IP in $IP_ENTRIES; do
+              echo "Deleting IP address '${IP}' with comment: 'prod ip whitelist'"
+              if ! atlas accessList delete "${IP}" --force --projectId $PROJECT_ID; then
+                echo "Failed to delete IP address: ${IP}"
+                exit 1
+              fi
+          done
+
+      - name: add currentIp for prod
+        if: inputs.environment == 'PROD'
+        shell: bash
+        run: atlas accessLists create ${{ steps.ip.outputs.ipv4 }} --type ipAddress --projectId ${{secrets.MONGODB_ATLAS_PROD_PROJECT_ID}} --comment "prod ip whitelist"
+
+      - name: Run script in prod
+        if: inputs.environment == 'PROD'
+        env:
+          MONGO_URI: ${{ env.PROD_MONGO_URI }}
+        run: python process_data.py
+
+
+
