@@ -1,0 +1,77 @@
+name: Quickbooks Sync
+
+on:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      PROD_MONGO_URI: ${{ secrets.INTRANET_MONGO_PROD_URI }}
+      MONGODB_ATLAS_PUBLIC_API_KEY: ${{ secrets.MONGODB_ATLAS_PUBLIC_API_KEY }}
+      MONGODB_ATLAS_PRIVATE_API_KEY: ${{ secrets.MONGODB_ATLAS_PRIVATE_API_KEY }}
+      MONGODB_ATLAS_ORG_ID: ${{ secrets.MONGODB_ATLAS_ORG_ID }}
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v2
+
+      - name: Get Public IP (cloudflare-ip)
+        id: cloudflare-ip
+        run: |
+          ipv4=$(dig +short -4 txt ch whoami.cloudflare @1.0.0.1)
+          echo "ipv4=$ipv4" >> $GITHUB_OUTPUT
+
+      - name: Setup AtlasCLI
+        uses: mongodb/atlas-github-action@v0.2.0
+
+      - name: Setup Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: "3.9"
+          cache: "pip"
+      - run: pip install -r requirements.txt
+
+      - name: cleanup of production IP access lists
+        shell: bash
+        run: |
+          export PROJECT_ID=${{ secrets.MONGODB_ATLAS_PROD_PROJECT_ID }}
+          IP_ENTRIES=$(atlas accessList list --projectId $PROJECT_ID -o json | jq -r '.results[] | select(.comment == "prod ip whitelist") | .ipAddress')
+
+          if [ -z "$IP_ENTRIES" ]; then
+            echo "No IP addresses found with the comment 'prod ip whitelist'."
+            exit 0
+          fi
+
+          for IP in $IP_ENTRIES; do
+              echo "Deleting IP address '${IP}' with comment: 'prod ip whitelist'"
+              if ! atlas accessList delete "${IP}" --force --projectId $PROJECT_ID; then
+                echo "Failed to delete IP address: ${IP}"
+                exit 1
+              fi
+          done
+
+      - name: add currentIp for prod
+        shell: bash
+        run: atlas accessLists create ${{ steps.cloudflare-ip.outputs.ipv4 }} --type ipAddress --projectId ${{secrets.MONGODB_ATLAS_PROD_PROJECT_ID}} --comment "prod ip whitelist"
+
+      - name: Retrieve Token
+        id: get_token
+        run: |
+          TOKEN=$(curl -L -X GET ${{ secrets.QUICKBOOKS_TOKEN_URL }} -H 'Authorization: Bearer ${{ secrets.BYPASS_TOKEN }}')
+          echo "TOKEN=$TOKEN" >> $GITHUB_ENV
+          echo $TOKEN
+      - name: Run script in prod
+        env:
+          MONGO_URI: ${{ env.PROD_MONGO_URI }}
+          TOKEN: ${{ env.TOKEN }}
+        run: |
+          python quickbooks_update_invoices.py \
+            --access_token '${{ env.TOKEN }}' \
+            --client_id '${{ secrets.QUICKBOOKS_APP_CLIENT_ID }}' \
+            --client_secret '${{ secrets.QUICKBOOKS_APP_CLIENT_SECRET }}' \
+            --company_id '${{ secrets.QUICKBOOKS_COMPANY_ID }}' \
+            --database_name 'explorai' \
+            --mongo_uri '${{ env.MONGO_URI }}'
