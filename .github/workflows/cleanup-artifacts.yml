@@ -1,0 +1,25 @@
+name: Cleanup Artifacts
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+
+    - name: Install GitHub CLI
+      run: sudo apt-get install -y gh
+
+    - name: Cleanup old artifacts
+      run: |
+        echo "Cleaning up old artifacts..."
+        gh api -H "Accept: application/vnd.github.v3+json" /repos/${{ github.repository }}/actions/artifacts | jq -r '.artifacts[] | select(.expired == false) | select(.created_at < "'$(date -d '-1 days' --utc +%Y-%m-%dT%H:%M:%SZ)'") | .id' | xargs -n1 -I {} gh api -X DELETE /repos/${{ github.repository }}/actions/artifacts/{}
+
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
